@@ -175,10 +175,17 @@ async def solve_slider_local(page, max_attempts: int = 5, console: Console = Non
                 await page.wait_for_timeout(20)
 
             await page.mouse.up()
-            await page.wait_for_timeout(2500)
+            await page.wait_for_timeout(1500)
 
-            # Cek apakah solved
-            if await _is_solved(page):
+            # Polling cek apakah solved (beri waktu Aliyun verifikasi & halaman redirect ke OTP)
+            is_ok = False
+            for _ in range(6):
+                if await _is_solved(page):
+                    is_ok = True
+                    break
+                await page.wait_for_timeout(1000)
+
+            if is_ok:
                 c.print(" [green]solved![/]")
                 write_log("Captcha solved locally", "SUCCESS")
                 return True
@@ -194,42 +201,43 @@ async def solve_slider_local(page, max_attempts: int = 5, console: Console = Non
 
 
 async def _is_solved(page) -> bool:
-    """Deteksi apakah captcha sudah solved."""
+    """Deteksi apakah captcha sudah benar-benar solved."""
     try:
-        # Check body text
-        body = await page.evaluate(
-            "() => document.body ? document.body.innerText.toLowerCase().substring(0,500) : ''"
+        # 1. Cek apakah halaman sudah berpindah ke step verifikasi OTP
+        otp_screen = await page.evaluate(
+            """() => {
+                const otpInput = document.querySelector('input[autocomplete="one-time-code"], input[aria-label*="Verification"], input.ant-otp-input');
+                const text = document.body ? document.body.innerText : '';
+                return Boolean(otpInput || text.includes('Verify your email') || text.includes('Enter the code'));
+            }"""
         )
-        if "verified" in body or "success" in body:
+        if otp_screen:
             return True
 
-        # Check wrapper visibility — jika hidden, captcha solved
-        wv = await page.evaluate(
-            "() => { const w=document.querySelector('#aliyunCaptcha-captcha-wrapper');"
-            " return w ? w.offsetParent !== null : false; }"
+        # 2. Cek apakah muncul punish click captcha atau error
+        is_punish_or_error = await page.evaluate(
+            """() => {
+                const text = document.body ? document.body.innerText.toLowerCase() : '';
+                const clickEl = document.querySelector('[class*="captchaclick"], [id*="captchaclick"], .aliyunCaptcha-click');
+                return Boolean(clickEl || text.includes('click in order') || text.includes('please try again') || text.includes('verification failed'));
+            }"""
         )
-        if not wv:
+        if is_punish_or_error:
+            return False
+
+        # 3. Cek ikon sukses eksplisit dari Aliyun
+        success = await page.evaluate(
+            """() => {
+                const ci = document.querySelector('#aliyunCaptcha-check-icon');
+                if (ci && ci.offsetParent !== null) return true;
+                const b = document.querySelector('#aliyunCaptcha-captcha-body');
+                if (b && (b.className.includes('pass') || b.className.includes('success'))) return true;
+                return false;
+            }"""
+        )
+        if success:
             return True
 
-        # Check slider — jika hilang setelah solve, captcha solved
-        slider_visible = await page.evaluate(
-            "() => { const s=document.querySelector('#aliyunCaptcha-sliding-slider');"
-            " return s && s.offsetParent !== null; }"
-        )
-        if not slider_visible:
-            return True
-
-        # Check success class on slider/captcha-body
-        cls = await page.evaluate(
-            "() => {"
-            " const s=document.querySelector('#aliyunCaptcha-sliding-slider');"
-            " const c=document.querySelector('#aliyunCaptcha-captcha-body');"
-            " const ci=document.querySelector('#aliyunCaptcha-check-icon, [class*=success], [class*=pass]');"
-            " if(ci&&ci.offsetParent!==null)return true;"
-            " if(s&&(s.className.includes('success')||s.className.includes('pass')))return true;"
-            " if(c&&(c.className.includes('success')||c.className.includes('pass')))return true;"
-            " return false; }"
-        )
-        return bool(cls)
+        return False
     except Exception:
         return False

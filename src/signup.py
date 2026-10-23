@@ -141,10 +141,12 @@ class SignupManager:
                 if not solved:
                     c.print("  :x: [red]Captcha failed![/]")
                     write_log(f"[{idx}] Captcha failed for {email}", "ERROR")
+                    await self._shot(page, "01_captcha_failed", c)
                     await context.close()
                     await browser.close()
                     return None
 
+                await self._shot(page, "01_after_captcha", c)
                 c.print("  :white_check_mark: [green]Captcha solved![/]")
                 await page.wait_for_timeout(2000)
 
