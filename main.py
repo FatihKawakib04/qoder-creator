@@ -155,13 +155,13 @@ def menu_view_results():
     table.add_column("Status", justify="center")
 
     for i, a in enumerate(accounts[-20:], 1):
-        pat = a.get("pat_token", "")
-        pat_short = f"{pat[:25]}..." if len(pat) > 25 else pat
+        pat = a.get("pat_token") or ""
+        pat_short = f"{pat[:25]}..." if len(pat) > 25 else (pat or "-")
         status = "[green]OK[/]" if a.get("pat_valid") else "[red]FAIL[/]"
         table.add_row(
             str(i),
-            a.get("email", "?"),
-            a.get("password", "?"),
+            a.get("email") or "?",
+            a.get("password") or "?",
             pat_short,
             status,
         )

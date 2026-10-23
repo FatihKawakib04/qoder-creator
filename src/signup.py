@@ -20,6 +20,22 @@ from .stealth import create_stealth_context, launch_stealth_browser
 from .captcha import solve_slider_local
 from .pat import PATManager
 
+import os
+
+SHOT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "debug_shots")
+os.makedirs(SHOT_DIR, exist_ok=True)
+
+
+async def _shot(page, name: str):
+    """Save a full-page screenshot + dump HTML for debugging."""
+    try:
+        await page.screenshot(path=os.path.join(SHOT_DIR, f"{name}.png"), full_page=True)
+        with open(os.path.join(SHOT_DIR, f"{name}.html"), "w", encoding="utf-8") as f:
+            f.write(await page.content())
+        write_log(f"screenshot: {name} url={page.url}", "INFO")
+    except Exception as e:
+        write_log(f"screenshot fail {name}: {e}", "ERROR")
+
 
 class SignupManager:
     """Handle Qoder signup + PAT creation."""
@@ -153,6 +169,9 @@ class SignupManager:
 
                 c.print(f"  :incoming_envelope: OTP: [bold green]{otp}[/]")
 
+                # Debug: snapshot before filling OTP
+                await _shot(page, "01_before_otp")
+
                 # Step 8: Fill OTP
                 c.print("  :keyboard: Filling OTP...")
                 otp_inputs = await page.query_selector_all('input.ant-otp-input')
@@ -169,19 +188,96 @@ class SignupManager:
                     else:
                         await page.keyboard.type(otp, delay=80)
 
-                await self._click(page, [
-                    'button:has-text("Create account")',
-                    'button:has-text("Verify")',
-                    'button[type="submit"]',
-                ])
-                await page.wait_for_timeout(8000)
+                # Debug: snapshot right after typing OTP
+                await _shot(page, "02_after_typing_otp")
+
+                # --- Robust OTP submit -------------------------------------
+                # Qoder's code field auto-submits once the last digit is typed,
+                # but this is flaky. Try several strategies until the page
+                # actually leaves the sign-up page.
+                def _left_signup(u: str) -> bool:
+                    return "sign-up" not in u and ("download" in u or "dashboard" in u or "workspace" in u)
+
+                async def _try_submit_otp():
+                    # Strategy 1: explicit button (if present)
+                    await self._click(page, [
+                        'button:has-text("Create account")',
+                        'button:has-text("Verify")',
+                        'button:has-text("Continue")',
+                        'button[type="submit"]',
+                    ])
+                    await page.wait_for_timeout(2500)
+                    if _left_signup(page.url):
+                        return True
+                    # Strategy 2: press Enter on the code field
+                    try:
+                        await page.keyboard.press("Enter")
+                    except Exception:
+                        pass
+                    await page.wait_for_timeout(2500)
+                    if _left_signup(page.url):
+                        return True
+                    # Strategy 3: clear + retype slowly + Enter
+                    try:
+                        inp = await page.query_selector('input[autocomplete="one-time-code"], input[inputmode="numeric"], input[maxlength="6"]')
+                        if inp:
+                            await inp.click()
+                            await page.keyboard.press("Control+A")
+                            await page.keyboard.press("Backspace")
+                            await page.wait_for_timeout(300)
+                            await page.keyboard.type(otp, delay=150)
+                            await page.wait_for_timeout(1500)
+                            await page.keyboard.press("Enter")
+                    except Exception:
+                        pass
+                    await page.wait_for_timeout(2500)
+                    return _left_signup(page.url)
+
+                current_url = page.url
+                for s in range(1, 4):
+                    ok_submit = await _try_submit_otp()
+                    current_url = page.url
+                    write_log(f"OTP submit strategy {s}: url={current_url} left={_left_signup(current_url)}", "INFO")
+                    if _left_signup(current_url):
+                        break
+
+                # Extra poll: give the site a moment to finish the redirect
+                for _ in range(6):
+                    if _left_signup(page.url):
+                        break
+                    await page.wait_for_timeout(2000)
+                current_url = page.url
+
+                # Debug: snapshot after attempting submit
+                await _shot(page, "03_after_verify")
 
                 # Step 9: Check result
-                current_url = page.url
-                if "download" in current_url or "dashboard" in current_url:
+                if _left_signup(current_url):
                     c.print("  :white_check_mark: [bold green]Account created![/]")
                 else:
-                    c.print("  :warning: [yellow]Account may be pending...[/]")
+                    c.print("  :warning: [yellow]Account may be pending... (url={current_url})[/]")
+
+                # Debug: dump all visible buttons + inputs to the log
+                try:
+                    btns = await page.evaluate(
+                        "() => Array.from(document.querySelectorAll('button, a[role=button], .ant-btn'))"
+                        ".map(b => (b.innerText||'').trim()).filter(Boolean)"
+                    )
+                    write_log(f"after-verify buttons={btns}", "INFO")
+                    c.print(f"  :label: buttons={btns}")
+                except Exception as e:
+                    write_log(f"button dump failed: {e}", "WARNING")
+
+                # Step 9b: If still on signup, try navigating to dashboard to force auth
+                if not ("download" in current_url or "dashboard" in current_url):
+                    c.print("  :arrows_counterclockwise: Trying to force session via dashboard...")
+                    try:
+                        await page.goto(f"{QODER_BASE}/users/sign-in", wait_until="domcontentloaded", timeout=60000)
+                        await page.wait_for_timeout(5000)
+                        await _shot(page, "04_signin_page")
+                        write_log(f"after signin nav url={page.url}", "INFO")
+                    except Exception as e:
+                        write_log(f"force session nav failed: {e}", "WARNING")
 
                 # Step 10: Create PAT
                 c.print("  :shield: Creating PAT...")
@@ -232,6 +328,26 @@ class SignupManager:
             except Exception:
                 continue
         return None
+
+    @staticmethod
+    async def _shot(page: Page, name: str, console: Console = None) -> None:
+        """Save a screenshot + visible button texts for debugging."""
+        import os
+        try:
+            outdir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "shots")
+            os.makedirs(outdir, exist_ok=True)
+            path = os.path.join(outdir, f"{name}.png")
+            await page.screenshot(path=path, full_page=True)
+            buttons = await page.evaluate(
+                """() => Array.from(document.querySelectorAll('button, a[role=button], .ant-btn'))
+                    .map(b => (b.innerText || '').trim()).filter(Boolean)"""
+            )
+            write_log(f"SHOT {name}: url={page.url} buttons={buttons}", "INFO")
+            if console:
+                console.print(f"  :camera: shot={name} url={page.url}")
+                console.print(f"  :label: buttons={buttons}")
+        except Exception as e:
+            write_log(f"SHOT {name} failed: {e}", "WARNING")
 
 
 async def create_accounts(

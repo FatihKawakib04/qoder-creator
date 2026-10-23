@@ -159,12 +159,37 @@ async def create_stealth_context(browser, proxy: Dict[str, str] = None):
     return context
 
 
+import os
+
+# Prefer the real Google Chrome install (lower bot-detection score than the
+# bundled Chromium). Fall back to bundled Chromium if Chrome isn't present.
+_CHROME_PATHS = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+]
+
+
+def _real_chrome_available() -> bool:
+    return any(os.path.exists(p) for p in _CHROME_PATHS)
+
+
 async def launch_stealth_browser(playwright, proxy: Dict[str, str] = None, headless: bool = True):
-    """Launch a Chromium browser with stealth args + optional proxy."""
+    """Launch a browser with stealth args + optional proxy.
+
+    Uses the real Google Chrome channel when available, which greatly reduces
+    Aliyun's bot risk score (avoids the second image-captcha "punish" page).
+    """
     launch_options = {
-        "headless": headless,
         "args": CHROMIUM_ARGS.copy(),
     }
+
+    if _real_chrome_available():
+        launch_options["channel"] = "chrome"
+        # Real Chrome refuses some aggressive automation flags in headless;
+        # run headed by default for best stealth. Callers can still pass headless.
+        launch_options["headless"] = headless
+    else:
+        launch_options["headless"] = headless
 
     if proxy and proxy.get("server"):
         launch_options["proxy"] = proxy

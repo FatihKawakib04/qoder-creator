@@ -15,10 +15,11 @@ config.toml
 proxies.txt
 .env
 
-# Output — accounts, logs, tokens
+# Output — accounts, logs, tokens, debug
 data/
 *.jsonl
 *.log
+debug_shots/
 
 # IDE
 .vscode/
